@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <numeric>
 #include <iostream>
+#include <sstream>  // Added this header for stringstream
 #include <stdexcept>
 #include <thread>
 #include <functional>
@@ -18,7 +19,8 @@ VectorAccumulator::VectorAccumulator(size_t n_buffers, size_t size, std::functio
       aligned_size((size + Vec4d::size() - 1) & ~(Vec4d::size() - 1)),
       buffers(std::make_unique<Buffer[]>(n_buffers)),
       buffer_ownership(n_buffers),
-      debug_callback(debug_cb){
+      checkout_times(n_buffers),
+      debug_callback(debug_cb) {
     if (n_buffers == 0 || size == 0) {
         throw std::invalid_argument("Buffer count and size must be positive");
     }
@@ -90,25 +92,36 @@ double* VectorAccumulator::checkout() {
 void VectorAccumulator::checkin(double* buffer) {
     std::lock_guard<std::mutex> lock(mtx);
 
-    auto it = std::find_if(&buffers[0], &buffers[num_buffers], [buffer](const Buffer& b) { return b.data == buffer; });
+    auto it = std::find_if(&buffers[0], &buffers[num_buffers], 
+                          [buffer](const Buffer& b) { return b.data == buffer; });
 
     if (it == &buffers[num_buffers]) {
         throw std::invalid_argument("Invalid buffer returned");
     }
 
-    if (!buffer_ownership[it->id]) {
+    size_t buffer_id = it->id;
+
+    if (!buffer_ownership[buffer_id]) {
         throw std::runtime_error("Buffer was not checked out");
     }
 
+    // Verify thread ownership
+    if (checkout_times[buffer_id].owner_thread != std::this_thread::get_id()) {
+        throw std::runtime_error("Buffer must be checked in by the thread that checked it out");
+    }
+
     it->in_use = false;
-    buffer_ownership[it->id] = false;
-    cv.notify_one();
+    buffer_ownership[buffer_id] = false;
+    active_checkouts--;
+    cv.notify_all();  // Changed from notify_one to notify_all
 
     if (debug_callback) {
-        debug_callback(("Buffer " + std::to_string(it->id) + " checked in").c_str());
+        std::stringstream ss;
+        ss << "Buffer " << buffer_id << " checked in by thread " 
+           << std::this_thread::get_id();
+        debug_callback(ss.str().c_str());
     }
 }
-
 // Try checkout with timeout
 std::optional<double*> VectorAccumulator::try_checkout(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mtx);
@@ -121,22 +134,31 @@ std::optional<double*> VectorAccumulator::try_checkout(std::chrono::milliseconds
 
     if (!got_buffer || is_shutting_down) {
         total_waits++;
+        auto wait_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_wait);
+        accumulated_wait_time.fetch_add(wait_duration.count());
         return std::nullopt;
     }
 
     auto it = std::find_if(&buffers[0], &buffers[num_buffers], [](const Buffer& b) { return !b.in_use; });
+    size_t buffer_id = it->id;
 
     it->in_use = true;
-    buffer_ownership[it->id] = true;
+    buffer_ownership[buffer_id] = true;
+    checkout_times[buffer_id].checkout_time = std::chrono::steady_clock::now();
+    checkout_times[buffer_id].owner_thread = std::this_thread::get_id();
+    active_checkouts++;
     total_checkouts++;
 
     if (debug_callback) {
-        debug_callback(("Buffer " + std::to_string(it->id) + " checked out").c_str());
+        std::stringstream ss;
+        ss << "Buffer " << buffer_id << " checked out by thread " 
+           << std::this_thread::get_id();
+        debug_callback(ss.str().c_str());
     }
 
     return it->data;
 }
-
 // Reset all buffers
 void VectorAccumulator::reset() {
     if (std::any_of(&buffers[0], &buffers[num_buffers], [](const Buffer& b) { return b.in_use; })) {
@@ -197,14 +219,19 @@ void VectorAccumulator::reduce(double* output) {
 
 // Cleanup buffers
 void VectorAccumulator::cleanup() {
+    is_shutting_down = true;
+    cv.notify_all();
+    
+    // Wait for all buffers to be checked in
+    std::unique_lock<std::mutex> lock(mtx);
+    cv.wait(lock, [this]() { return active_checkouts == 0; });
+    
     for (size_t i = 0; i < num_buffers; ++i) {
         if (buffers[i].data) {
             free(buffers[i].data);
             buffers[i].data = nullptr;
         }
     }
-    is_shutting_down = true;
-    cv.notify_all();
 }
 
 // Get statistics
@@ -214,9 +241,8 @@ VectorAccumulator::BufferStats VectorAccumulator::get_statistics() const {
     
     stats.total_checkouts = total_checkouts;
     stats.total_waits = total_waits;
-    stats.currently_checked_out = 0;
+    stats.currently_checked_out = active_checkouts.load();
     
-    // Calculate average wait time
     if (total_waits > 0) {
         stats.average_wait_time_ms = 
             static_cast<double>(accumulated_wait_time.load()) / total_waits;
@@ -224,12 +250,12 @@ VectorAccumulator::BufferStats VectorAccumulator::get_statistics() const {
         stats.average_wait_time_ms = 0.0;
     }
     
-    // Count currently checked out buffers and gather their details
+    auto now = std::chrono::steady_clock::now();
     for (size_t i = 0; i < num_buffers; ++i) {
         if (buffer_ownership[i]) {
-            stats.currently_checked_out++;
-            // Note: In a real implementation, you might want to track checkout times
-            stats.current_checkouts.emplace_back(i, std::chrono::milliseconds(0));
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - checkout_times[i].checkout_time);
+            stats.current_checkouts.emplace_back(i, duration);
         }
     }
     
@@ -288,6 +314,34 @@ void VectorAccumulator::log_debug(const std::string& message) {
     if (debug_callback) {
         debug_callback(message.c_str());
     }
+}
+
+// Add these implementations to VectorAccumulator.cpp
+
+std::vector<bool> VectorAccumulator::get_buffer_usage() const {
+    std::lock_guard<std::mutex> lock(mtx);
+    std::vector<bool> usage(num_buffers);
+    for (size_t i = 0; i < num_buffers; ++i) {
+        usage[i] = buffer_ownership[i];
+    }
+    return usage;
+}
+
+VectorAccumulator::PerformanceStats VectorAccumulator::get_performance_stats() const {
+    PerformanceStats stats;
+    stats.total_cycles = total_cycles.load();
+    stats.reduction_cycles = reduction_cycles.load();
+    
+    // Calculate average cycles per reduction
+    uint64_t total_reductions = total_checkouts.load();
+    if (total_reductions > 0) {
+        stats.avg_cycles_per_reduction = 
+            static_cast<double>(stats.reduction_cycles) / total_reductions;
+    } else {
+        stats.avg_cycles_per_reduction = 0.0;
+    }
+    
+    return stats;
 }
 
 // RDTSC (Read Time-Stamp Counter)
