@@ -1,4 +1,4 @@
-#include "VectorAccumulator.h"
+#include <VectorAccumulator/VectorAccumulator.hpp>
 #include <benchmark/benchmark.h>
 
 static void Benchmark_VectorAccumulator(benchmark::State& state) {

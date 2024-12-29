@@ -12,12 +12,13 @@
 thread_local size_t VectorAccumulator::last_used_buffer = 0;
 
 // Constructor
-VectorAccumulator::VectorAccumulator(size_t n_buffers, size_t size)
+VectorAccumulator::VectorAccumulator(size_t n_buffers, size_t size, std::function<void(const char*)> debug_cb)
     : num_buffers(n_buffers),
       buffer_size(size),
       aligned_size((size + Vec4d::size() - 1) & ~(Vec4d::size() - 1)),
       buffers(std::make_unique<Buffer[]>(n_buffers)),
-      buffer_ownership(n_buffers) {
+      buffer_ownership(n_buffers),
+      debug_callback(debug_cb){
     if (n_buffers == 0 || size == 0) {
         throw std::invalid_argument("Buffer count and size must be positive");
     }
@@ -52,7 +53,7 @@ VectorAccumulator::VectorAccumulator(VectorAccumulator&& other) noexcept
 }
 
 // Debug callback setter
-void VectorAccumulator::set_debug_callback(const std::function<void(const char*)>& callback) {
+void VectorAccumulator::set_debug_callback(DebugCallback callback) {
     debug_callback = callback;
 }
 
@@ -206,6 +207,73 @@ void VectorAccumulator::cleanup() {
     cv.notify_all();
 }
 
+// Get statistics
+VectorAccumulator::BufferStats VectorAccumulator::get_statistics() const {
+    std::lock_guard<std::mutex> lock(mtx);
+    BufferStats stats;
+    
+    stats.total_checkouts = total_checkouts;
+    stats.total_waits = total_waits;
+    stats.currently_checked_out = 0;
+    
+    // Calculate average wait time
+    if (total_waits > 0) {
+        stats.average_wait_time_ms = 
+            static_cast<double>(accumulated_wait_time.load()) / total_waits;
+    } else {
+        stats.average_wait_time_ms = 0.0;
+    }
+    
+    // Count currently checked out buffers and gather their details
+    for (size_t i = 0; i < num_buffers; ++i) {
+        if (buffer_ownership[i]) {
+            stats.currently_checked_out++;
+            // Note: In a real implementation, you might want to track checkout times
+            stats.current_checkouts.emplace_back(i, std::chrono::milliseconds(0));
+        }
+    }
+    
+    return stats;
+}
+
+// Force release a buffer
+bool VectorAccumulator::force_release(size_t buffer_index) {
+    if (buffer_index >= num_buffers) {
+        throw std::out_of_range("Invalid buffer index");
+    }
+    
+    std::lock_guard<std::mutex> lock(mtx);
+    if (!buffer_ownership[buffer_index]) {
+        return false;  // Buffer was already free
+    }
+    
+    buffer_ownership[buffer_index] = false;
+    buffers[buffer_index].in_use = false;
+    cv.notify_one();
+    
+    log_debug("Buffer forcefully released: " + std::to_string(buffer_index));
+    return true;
+}
+
+// Peek at buffer contents
+std::vector<double> VectorAccumulator::peek_buffer(size_t buffer_index, 
+                                                  size_t start, 
+                                                  size_t length) const {
+    if (buffer_index >= num_buffers) {
+        throw std::out_of_range("Invalid buffer index");
+    }
+    if (start + length > buffer_size) {
+        throw std::out_of_range("Invalid range");
+    }
+    
+    std::lock_guard<std::mutex> lock(mtx);
+    std::vector<double> result(length);
+    std::copy(buffers[buffer_index].data + start,
+              buffers[buffer_index].data + start + length,
+              result.begin());
+    return result;
+}
+
 // Aligned allocation
 template<typename T>
 T* VectorAccumulator::allocate_aligned(size_t size, size_t alignment) {
@@ -214,6 +282,12 @@ T* VectorAccumulator::allocate_aligned(size_t size, size_t alignment) {
         throw std::bad_alloc();
     }
     return static_cast<T*>(ptr);
+}
+
+void VectorAccumulator::log_debug(const std::string& message) {
+    if (debug_callback) {
+        debug_callback(message.c_str());
+    }
 }
 
 // RDTSC (Read Time-Stamp Counter)

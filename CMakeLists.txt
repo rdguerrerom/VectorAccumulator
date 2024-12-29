@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-
 # Define build type if not specified
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -16,18 +15,6 @@ endif()
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_EXAMPLES "Build examples" ON)
 option(BUILD_BENCHMARKS "Build benchmarks" ON)
-
-# Compiler-specific settings
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    if(APPLE)
-        # Use Homebrew GCC on macOS if available
-        find_program(GNU_GXX "g++-13")
-        if(GNU_GXX)
-            set(CMAKE_CXX_COMPILER ${GNU_GXX})
-            message(STATUS "Using Homebrew GCC: ${GNU_GXX}")
-        endif()
-    endif()
-endif()
 
 # Add custom CMake modules path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -48,10 +35,9 @@ FetchContent_Declare(
 # Make VCL2 available
 FetchContent_MakeAvailable(vcl2)
 
-# After FetchContent_MakeAvailable(vcl2)
+# Create VCL2 interface library
 FetchContent_GetProperties(vcl2)
 if(vcl2_POPULATED)
-    # Create an interface library for VCL2
     add_library(vcl2_headers INTERFACE)
     target_include_directories(vcl2_headers INTERFACE
         $<BUILD_INTERFACE:${vcl2_SOURCE_DIR}>
@@ -59,35 +45,12 @@ if(vcl2_POPULATED)
     )
 endif()
 
-# Then modify the target_include_directories for vector_accumulator
-target_include_directories(vector_accumulator
-    PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
-        $<INSTALL_INTERFACE:include>
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/lib
-)
-
-# And modify the target_link_libraries to include vcl2_headers
-target_link_libraries(vector_accumulator
-    PUBLIC
-        Threads::Threads
-        vcl2_headers
-)
-
-## Get VCL2 properties and set include directory
-#FetchContent_GetProperties(vcl2)
-#if(vcl2_POPULATED)
-#    set(VCL2_INCLUDE_DIR ${vcl2_SOURCE_DIR})
-#endif()
-
 # Find required packages
 find_package(Threads REQUIRED)
 
 # Platform-specific compiler flags
 if(APPLE)
     add_definitions(-D_DARWIN_C_SOURCE)
-    # Ensure proper CPU architecture detection on macOS
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
         set(ARCH_FLAGS "-mcpu=apple-m1")
     else()
@@ -102,12 +65,11 @@ add_library(vector_accumulator
     lib/VectorAccumulator.cpp
 )
 
-# Include directories
+# Set header include directory structure
 target_include_directories(vector_accumulator
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include>
-        ${VCL2_INCLUDE_DIR}
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
@@ -116,6 +78,7 @@ target_include_directories(vector_accumulator
 target_link_libraries(vector_accumulator
     PUBLIC
         Threads::Threads
+        vcl2_headers
 )
 
 # Enhanced compiler flags with platform-specific optimizations
@@ -150,7 +113,7 @@ if(BUILD_EXAMPLES)
     )
     set_target_properties(vector_accumulator_example 
         PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/examples/${CMAKE_BUILD_TYPE}
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/examples
     )
 endif()
 
@@ -162,7 +125,6 @@ if(BUILD_TESTS)
         GIT_REPOSITORY https://github.com/google/googletest.git
         GIT_TAG release-1.12.1
     )
-    # For macOS compatibility
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 
@@ -176,7 +138,7 @@ if(BUILD_TESTS)
     )
     set_target_properties(vector_accumulator_tests 
         PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/tests/${CMAKE_BUILD_TYPE}
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/tests
     )
     
     include(GoogleTest)
@@ -204,7 +166,7 @@ if(BUILD_BENCHMARKS)
     )
     set_target_properties(vector_accumulator_benchmarks 
         PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/benchmarks/${CMAKE_BUILD_TYPE}
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/benchmarks
     )
 endif()
 
@@ -222,11 +184,12 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/VectorAccumulator
     FILES_MATCHING PATTERN "*.hpp"
 )
 
-# Install VCL2 headers
-install(DIRECTORY ${VCL2_INCLUDE_DIR}/
-    DESTINATION include/vcl2
-    FILES_MATCHING PATTERN "*.h"
-)
+if(vcl2_POPULATED)
+    install(DIRECTORY ${vcl2_SOURCE_DIR}/
+        DESTINATION include/vcl2
+        FILES_MATCHING PATTERN "*.h"
+    )
+endif()
 
 install(EXPORT vector-accumulator-targets
     FILE VectorAccumulatorTargets.cmake

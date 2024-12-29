@@ -199,7 +199,14 @@ public:
 
 private:
     // Forward declaration of internal buffer structure
-    struct Buffer;
+    struct Buffer {
+        double* data;
+        bool in_use;
+        size_t id;
+    };
+
+    // Remove this forward declaration since we now have the full definition
+    // struct Buffer;
 
     // Constants for optimization
     static constexpr size_t CACHE_LINE_SIZE = 64;
