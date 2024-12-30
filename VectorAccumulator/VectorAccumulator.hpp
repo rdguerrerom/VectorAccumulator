@@ -208,7 +208,11 @@ private:
   struct CheckoutInfo {
     std::chrono::steady_clock::time_point checkout_time;
     std::thread::id owner_thread;
-  };
+    bool is_checked_out;
+    
+    CheckoutInfo() : is_checked_out(false) {}
+};
+
 
   std::vector<CheckoutInfo> checkout_times;
   std::atomic<size_t> active_checkouts{0};
@@ -246,4 +250,6 @@ private:
   static inline uint64_t rdtsc();
   void cleanup();
   void log_debug(const std::string& message);
+
+  std::vector<CheckoutInfo> checkout_info;  
 };

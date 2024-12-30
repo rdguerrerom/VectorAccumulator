@@ -1,0 +1,89 @@
+---
+Language: Cpp
+Standard: c++17
+
+# Basic formatting
+BasedOnStyle: Google
+IndentWidth: 2
+ColumnLimit: 100
+UseTab: Never
+MaxEmptyLinesToKeep: 1
+
+# Braces and blocks
+BreakBeforeBraces: Attach
+AllowShortBlocksOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+IndentCaseLabels: true
+
+# Alignment and spacing
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignOperands: true
+AlignTrailingComments: true
+AlignEscapedNewlines: Left
+AlignAfterOpenBracket: Align
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInContainerLiterals: true
+SpacesInCStyleCastParentheses: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Line breaks
+AlwaysBreakAfterReturnType: None
+AlwaysBreakBeforeMultilineStrings: true
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+
+# Penalties
+PenaltyBreakAssignment: 2
+PenaltyBreakBeforeFirstCallParameter: 1
+PenaltyBreakComment: 300
+PenaltyBreakFirstLessLess: 120
+PenaltyBreakString: 1000
+PenaltyExcessCharacter: 1000000
+PenaltyReturnTypeOnItsOwnLine: 200
+
+# Pointer alignment
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# Include sorting
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex:           '^<[a-z_]+>'
+    Priority:        1
+  - Regex:           '^<[a-z_]+.h>'
+    Priority:        2
+  - Regex:           '^<.*>'
+    Priority:        3
+  - Regex:           '.*'
+    Priority:        4
+
+# Namespace formatting
+NamespaceIndentation: None
+CompactNamespaces: false
+FixNamespaceComments: true
+
+# Template formatting
+SpaceAfterTemplateKeyword: true
+AlwaysBreakTemplateDeclarations: Yes
+
+# Function formatting
+AllowAllParametersOfDeclarationOnNextLine: true
+BinPackParameters: false
+ExperimentalAutoDetectBinPacking: false
+
+# Comments
+ReflowComments: true
