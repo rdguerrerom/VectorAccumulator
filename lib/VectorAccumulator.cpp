@@ -190,7 +190,8 @@ std::optional<double*> VectorAccumulator::try_checkout(std::chrono::milliseconds
     bool got_buffer = cv.wait_for(lock, timeout, [this]() {
         if (is_shutting_down)
             return true;
-        return std::any_of(&buffers[0], &buffers[num_buffers], [](const Buffer& b) { return !b.in_use; });
+        return std::any_of(checkout_info.begin(), checkout_info.end(),
+                          [](const CheckoutInfo& info) { return !info.is_checked_out; });
     });
 
     if (!got_buffer || is_shutting_down) {
@@ -201,15 +202,15 @@ std::optional<double*> VectorAccumulator::try_checkout(std::chrono::milliseconds
         return std::nullopt;
     }
 
-    auto it =
-        std::find_if(&buffers[0], &buffers[num_buffers], [](const Buffer& b) { return !b.in_use; });
-    size_t buffer_id = it->id;
+    // Find available buffer using checkout_info
+    auto it = std::find_if(checkout_info.begin(), checkout_info.end(),
+                          [](const CheckoutInfo& info) { return !info.is_checked_out; });
+    size_t buffer_id = std::distance(checkout_info.begin(), it);
 
-    it->in_use = true;
-    buffer_ownership[buffer_id] = true;
     checkout_info[buffer_id].is_checked_out = true;
     checkout_info[buffer_id].checkout_time = std::chrono::steady_clock::now();
     checkout_info[buffer_id].owner_thread = std::this_thread::get_id();
+    buffers[buffer_id].in_use = true;
     active_checkouts++;
     total_checkouts++;
 
@@ -219,7 +220,7 @@ std::optional<double*> VectorAccumulator::try_checkout(std::chrono::milliseconds
         debug_callback(ss.str().c_str());
     }
 
-    return it->data;
+    return buffers[buffer_id].data;
 }
 
 // Reset all buffers
@@ -349,23 +350,34 @@ void VectorAccumulator::reduce(double* output) {
     
     reduction_cycles.fetch_add(rdtsc() - start_cycles, std::memory_order_relaxed);
 }
-// Cleanup buffers
-void VectorAccumulator::cleanup() {
-  is_shutting_down = true;
-  cv.notify_all();
-
-  // Wait for all buffers to be checked in
-  std::unique_lock<std::mutex> lock(mtx);
-  cv.wait(lock, [this]() { return active_checkouts == 0; });
-
-  for (size_t i = 0; i < num_buffers; ++i) {
-    if (buffers[i].data) {
-      free(buffers[i].data);
-      buffers[i].data = nullptr;
+// Add before_cleanup method for safe shutdown
+void VectorAccumulator::before_cleanup() {
+    std::unique_lock<std::mutex> lock(mtx);
+    
+    // Reset all buffer states
+    for (size_t i = 0; i < num_buffers; ++i) {
+        checkout_info[i].is_checked_out = false;
+        buffers[i].in_use = false;
     }
-  }
+    
+    active_checkouts.store(0);
 }
 
+// Update cleanup method
+void VectorAccumulator::cleanup() {
+    is_shutting_down = true;
+    cv.notify_all();
+
+    before_cleanup();  // Reset states before final cleanup
+
+    std::unique_lock<std::mutex> lock(mtx);
+    for (size_t i = 0; i < num_buffers; ++i) {
+        if (buffers[i].data) {
+            free(buffers[i].data);
+            buffers[i].data = nullptr;
+        }
+    }
+}
 // Get statistics
 VectorAccumulator::BufferStats VectorAccumulator::get_statistics() const {
   std::lock_guard<std::mutex> lock(mtx);

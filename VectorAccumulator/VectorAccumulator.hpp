@@ -250,6 +250,7 @@ private:
   T* allocate_aligned(size_t size, size_t alignment);
   static inline uint64_t rdtsc();
   void cleanup();
+  void before_cleanup();
   void log_debug(const std::string& message);
 
   std::vector<CheckoutInfo> checkout_info;  

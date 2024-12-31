@@ -7,6 +7,8 @@
 #include <condition_variable>
 #include <vector>
 #include <cstring>
+#include <random>
+#include <future>
 
 class VectorAccumulatorTest : public ::testing::Test {
 protected:
@@ -24,7 +26,17 @@ protected:
             std::rethrow_exception(exception_ptr);
         }
     }
+
+    static std::vector<double> generateRandomData(size_t size) {
+        std::vector<double> data(size);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<> dis(-1000.0, 1000.0);
+        for (auto& val : data) val = dis(gen);
+        return data;
+    }
 };
+
 
 // Test constructor and initial state
 TEST_F(VectorAccumulatorTest, ConstructorInitialization) {
@@ -112,111 +124,6 @@ TEST_F(VectorAccumulatorTest, ResetBuffers) {
     EXPECT_EQ(accumulator.get_statistics().currently_checked_out, 0);
 }
 
-// Test reduce functionality
-// Test reduce functionality
-/*TEST_F(VectorAccumulatorTest, ReduceBuffers) {
-    const size_t buffer_size = 1024;
-    VectorAccumulator accumulator(4, buffer_size);
-    std::vector<std::thread> threads;
-    std::atomic<int> completed_threads{0};
-    std::mutex completion_mutex;
-    std::condition_variable completion_cv;
-    
-    // Fill buffers in separate threads
-    for (int i = 0; i < 4; ++i) {
-        threads.emplace_back([&, i]() {
-            double* buffer = accumulator.checkout();
-            ASSERT_NE(buffer, nullptr);
-            
-            // Fill buffer with consistent values
-            for (size_t j = 0; j < buffer_size; ++j) {
-                buffer[j] = static_cast<double>(i);  // Each thread writes its index
-            }
-            
-            // Ensure memory visibility
-            std::atomic_thread_fence(std::memory_order_release);
-            accumulator.checkin(buffer);
-            
-            {
-                std::lock_guard<std::mutex> lock(completion_mutex);
-                completed_threads++;
-                completion_cv.notify_one();
-            }
-        });
-    }
-
-    // Wait for all threads to complete
-    {
-        std::unique_lock<std::mutex> lock(completion_mutex);
-        ASSERT_TRUE(completion_cv.wait_for(lock, std::chrono::seconds(5),
-            [&]() { return completed_threads == 4; }));
-    }
-
-    // Now reduce
-    alignas(64) std::vector<double> output(buffer_size);
-    ASSERT_NO_THROW(accumulator.reduce(output.data()));
-
-    // Verify results
-    const double expected_sum = 0.0 + 1.0 + 2.0 + 3.0;  // Sum of thread indices
-    for (size_t j = 0; j < buffer_size; ++j) {
-        EXPECT_DOUBLE_EQ(output[j], expected_sum)
-            << "Mismatch at position " << j << ": expected " << expected_sum
-            << ", got " << output[j];
-    }
-
-    for (auto& t : threads) {
-        t.join();
-    }
-}*/
-// Additional Test: ReduceBuffersAdvanced
-/*TEST_F(VectorAccumulatorTest, ReduceBuffersAdvanced) {
-    const size_t buffer_size = 1024;
-    const size_t num_buffers = 4;
-    VectorAccumulator accumulator(num_buffers, buffer_size);
-
-    // Simulate buffers being filled by different threads
-    std::vector<std::thread> threads;
-    for (size_t i = 0; i < num_buffers; ++i) {
-        threads.emplace_back([&, i]() {
-            double* buffer = accumulator.checkout();
-            ASSERT_NE(buffer, nullptr);
-
-            // Fill buffer with values based on thread index and buffer index
-            for (size_t j = 0; j < buffer_size; ++j) {
-                buffer[j] = static_cast<double>(i + j * 0.1);
-            }
-
-            // Release the buffer
-            accumulator.checkin(buffer);
-        });
-    }
-
-    // Wait for threads to complete
-    for (auto& t : threads) {
-        t.join();
-    }
-
-    // Verify all buffers are checked in before reduction
-    auto buffer_usage = accumulator.get_buffer_usage();
-    for (bool is_in_use : buffer_usage) {
-        ASSERT_FALSE(is_in_use) << "Buffer is still in use before reduction.";
-    }
-
-    // Reduce the buffers into a single output buffer
-    alignas(64) std::vector<double> output(buffer_size, 0.0);
-    ASSERT_NO_THROW(accumulator.reduce(output.data()));
-
-    // Verify the reduced results
-    for (size_t j = 0; j < buffer_size; ++j) {
-        double expected_sum = 0.0;
-        for (size_t i = 0; i < num_buffers; ++i) {
-            expected_sum += static_cast<double>(i + j * 0.1);
-        }
-        EXPECT_NEAR(output[j], expected_sum, 1e-9)
-            << "Mismatch at position " << j << ": expected " << expected_sum 
-            << ", got " << output[j];
-    }
-}*/
 // Test try_checkout with timeout
 TEST_F(VectorAccumulatorTest, TryCheckoutTimeout) {
     VectorAccumulator accumulator(1, 1024);
@@ -311,35 +218,119 @@ TEST_F(VectorAccumulatorTest, ReduceShouldCorrectlyReduceAllBuffersIntoOutput) {
   accumulator.checkin(buffer);
 }
 
-/*TEST_F(VectorAccumulatorTest, ReduceShouldCorrectlyReduceAllBuffersIntoOutput2) {
+TEST_F(VectorAccumulatorTest, HighContention) {
     const size_t n_buffers = 4;
-    const size_t buffer_size = 1000;
+    const size_t buffer_size = 1024;
+    VectorAccumulator accumulator(n_buffers, buffer_size);
+    
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> successful_ops{0};
+    std::atomic<size_t> failed_ops{0};
+    
+    auto worker = [&](int id) {
+        while (!stop) {
+            try {
+                if (auto buffer = accumulator.try_checkout(std::chrono::milliseconds(50))) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    accumulator.checkin(*buffer);
+                    successful_ops++;
+                } else {
+                    failed_ops++;
+                }
+            } catch (...) {
+                failed_ops++;
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back(worker, i);
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    stop = true;
+
+    for (auto& t : threads) t.join();
+
+    EXPECT_GT(successful_ops, 0);
+    auto stats = accumulator.get_statistics();
+    EXPECT_EQ(stats.total_checkouts, successful_ops);
+}
+
+TEST_F(VectorAccumulatorTest, LargeDataReduction) {
+    const size_t n_buffers = 4;
+    const size_t buffer_size = 1024 * 1024;  // 1M elements
     VectorAccumulator accumulator(n_buffers, buffer_size);
 
-    std::vector<double> expected_output(buffer_size, 0.0);
-
-    // Check out all buffers and fill them with different values
+    std::vector<std::future<void>> futures;
+    std::vector<std::vector<double>> expected_values(n_buffers);
+    
     for (size_t i = 0; i < n_buffers; ++i) {
+        futures.push_back(std::async(std::launch::async, [&, i]() {
+            double* buffer = accumulator.checkout();
+            expected_values[i] = generateRandomData(buffer_size);
+            std::memcpy(buffer, expected_values[i].data(), buffer_size * sizeof(double));
+            accumulator.checkin(buffer);
+        }));
+    }
+
+    for (auto& f : futures) f.wait();
+
+    std::vector<double> output(buffer_size);
+    accumulator.reduce(output.data());
+
+    for (size_t i = 0; i < buffer_size; ++i) {
+        double expected = 0.0;
+        for (const auto& vec : expected_values) expected += vec[i];
+        EXPECT_NEAR(output[i], expected, std::abs(expected) * 1e-10);
+    }
+}
+
+TEST_F(VectorAccumulatorTest, EdgeCaseBufferHandling) {
+    VectorAccumulator accumulator(1, 1);
+    
+    {
         double* buffer = accumulator.checkout();
-        for (size_t j = 0; j < buffer_size; ++j) {
-            buffer[j] = i * 1000 + j;
-            expected_output[j] += buffer[j];
-        }
+        buffer[0] = std::numeric_limits<double>::max();
+        accumulator.checkin(buffer);
+    }
+    
+    {
+        double* buffer = accumulator.checkout();
+        buffer[0] = std::numeric_limits<double>::min();
         accumulator.checkin(buffer);
     }
 
-    // Prepare aligned output buffer
-    double* output = static_cast<double*>(aligned_alloc(32, buffer_size * sizeof(double)));
-    std::memset(output, 0, buffer_size * sizeof(double));
+    std::vector<double> output(1);
+    EXPECT_NO_THROW(accumulator.reduce(output.data()));
+}
+TEST_F(VectorAccumulatorTest, RaceConditionResilience) {
+    VectorAccumulator accumulator(4, 1024);
+    std::atomic<bool> start{false};
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> threads;
 
-    // Perform reduction
-    accumulator.reduce(output);
-
-    // Verify results
-    for (size_t i = 0; i < buffer_size; ++i) {
-        EXPECT_DOUBLE_EQ(output[i],expected_output[i]);
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back([&]() {
+            while (!start) std::this_thread::yield();
+            while (!stop) {
+                try {
+                    if (auto buffer = accumulator.try_checkout(std::chrono::milliseconds(0))) {
+                        accumulator.checkin(*buffer);
+                    }
+                } catch (...) {}
+            }
+        });
     }
 
-    // Clean up
-    free(output);
-}*/
+    start = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop = true;
+    for (auto& t : threads) t.join();
+    
+    // Give time for any pending operations to complete
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto stats = accumulator.get_statistics();
+    EXPECT_TRUE(stats.current_checkouts.empty());
+}
