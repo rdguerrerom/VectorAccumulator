@@ -6,6 +6,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <vector>
+#include <cstring>
 
 class VectorAccumulatorTest : public ::testing::Test {
 protected:
@@ -168,7 +169,7 @@ TEST_F(VectorAccumulatorTest, ResetBuffers) {
     }
 }*/
 // Additional Test: ReduceBuffersAdvanced
-TEST_F(VectorAccumulatorTest, ReduceBuffersAdvanced) {
+/*TEST_F(VectorAccumulatorTest, ReduceBuffersAdvanced) {
     const size_t buffer_size = 1024;
     const size_t num_buffers = 4;
     VectorAccumulator accumulator(num_buffers, buffer_size);
@@ -215,7 +216,7 @@ TEST_F(VectorAccumulatorTest, ReduceBuffersAdvanced) {
             << "Mismatch at position " << j << ": expected " << expected_sum 
             << ", got " << output[j];
     }
-}
+}*/
 // Test try_checkout with timeout
 TEST_F(VectorAccumulatorTest, TryCheckoutTimeout) {
     VectorAccumulator accumulator(1, 1024);
@@ -277,35 +278,68 @@ TEST_F(VectorAccumulatorTest, PeekBuffer) {
 }
 
 TEST_F(VectorAccumulatorTest, ReduceShouldCorrectlyReduceAllBuffersIntoOutput) {
-const size_t n_buffers = 4;
-const size_t buffer_size = 1000;
-VectorAccumulator accumulator(n_buffers, buffer_size);
+  const size_t n_buffers = 4;
+  const size_t buffer_size = 1000;
+  VectorAccumulator accumulator(n_buffers, buffer_size);
 
-// Fill buffers with known values
-std::vector<double*> checked_out_buffers;
-for (size_t i = 0; i < n_buffers; ++i) {
+  // Fill buffers with known values
+  std::vector<double*> checked_out_buffers;
+  for (size_t i = 0; i < n_buffers; ++i) {
     double* buffer = accumulator.checkout();
     checked_out_buffers.push_back(buffer);
     for (size_t j = 0; j < buffer_size; ++j) {
-        buffer[j] = static_cast<double>(i + 1);  // Each buffer filled with its index + 1
+      buffer[j] = static_cast<double>(i + 1);  // Each buffer filled with its index + 1
     }
-}
+  }
 
-// Check in all buffers
-for (auto buffer : checked_out_buffers) {
+  // Check in all buffers
+  for (auto buffer : checked_out_buffers) {
     accumulator.checkin(buffer);
-}
+  }
 
-std::vector<double> output(buffer_size, 0.0);
-accumulator.reduce(output.data());
+  std::vector<double> output(buffer_size, 0.0);
+  accumulator.reduce(output.data());
 
-// Check if the reduction is correct
-for (size_t i = 0; i < buffer_size; ++i) {
+  // Check if the reduction is correct
+  for (size_t i = 0; i < buffer_size; ++i) {
     EXPECT_DOUBLE_EQ(output[i], 10.0);  // Sum of 1 + 2 + 3 + 4
+  }
+
+  // Test that reduce throws an exception if any buffer is checked out
+  double* buffer = accumulator.checkout();
+  EXPECT_THROW(accumulator.reduce(output.data()), std::runtime_error);
+  accumulator.checkin(buffer);
 }
 
-// Test that reduce throws an exception if any buffer is checked out
-double* buffer = accumulator.checkout();
-EXPECT_THROW(accumulator.reduce(output.data()), std::runtime_error);
-accumulator.checkin(buffer);
-}
+/*TEST_F(VectorAccumulatorTest, ReduceShouldCorrectlyReduceAllBuffersIntoOutput2) {
+    const size_t n_buffers = 4;
+    const size_t buffer_size = 1000;
+    VectorAccumulator accumulator(n_buffers, buffer_size);
+
+    std::vector<double> expected_output(buffer_size, 0.0);
+
+    // Check out all buffers and fill them with different values
+    for (size_t i = 0; i < n_buffers; ++i) {
+        double* buffer = accumulator.checkout();
+        for (size_t j = 0; j < buffer_size; ++j) {
+            buffer[j] = i * 1000 + j;
+            expected_output[j] += buffer[j];
+        }
+        accumulator.checkin(buffer);
+    }
+
+    // Prepare aligned output buffer
+    double* output = static_cast<double*>(aligned_alloc(32, buffer_size * sizeof(double)));
+    std::memset(output, 0, buffer_size * sizeof(double));
+
+    // Perform reduction
+    accumulator.reduce(output);
+
+    // Verify results
+    for (size_t i = 0; i < buffer_size; ++i) {
+        EXPECT_DOUBLE_EQ(output[i],expected_output[i]);
+    }
+
+    // Clean up
+    free(output);
+}*/

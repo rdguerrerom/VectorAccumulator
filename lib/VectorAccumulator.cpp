@@ -39,7 +39,7 @@ VectorAccumulator::VectorAccumulator(size_t n_buffers,
     buffers[i].in_use = false;
     buffers[i].id = i;
     buffer_ownership[i] = false;
-    buffer_ready[i].store(false, std::memory_order_release);
+    //buffer_ready[i].store(false, std::memory_order_release);
 
     // NUMA-aware allocation
     for (size_t j = 0; j < aligned_size; j += 64 / sizeof(double)) {
