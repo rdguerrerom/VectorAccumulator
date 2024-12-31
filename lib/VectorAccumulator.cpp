@@ -7,6 +7,11 @@
 #include <sstream>  // Added this header for stringstream
 #include <stdexcept>
 #include <thread>
+#include <atomic>
+
+#include <vector>
+#include <mutex>
+#include <cmath> 
 
 #include <VectorAccumulator/VectorAccumulator.hpp>
 
@@ -34,6 +39,7 @@ VectorAccumulator::VectorAccumulator(size_t n_buffers,
     buffers[i].in_use = false;
     buffers[i].id = i;
     buffer_ownership[i] = false;
+    buffer_ready[i].store(false, std::memory_order_release);
 
     // NUMA-aware allocation
     for (size_t j = 0; j < aligned_size; j += 64 / sizeof(double)) {
@@ -84,6 +90,13 @@ double* VectorAccumulator::checkout() {
         buffers[last_used_buffer].in_use = true;
         active_checkouts++;
         total_checkouts++;
+
+        if (debug_callback) {
+            std::stringstream ss;
+            ss << "Buffer " << last_used_buffer << " checked out by thread " << std::this_thread::get_id();
+            debug_callback(ss.str().c_str());
+        }
+
         return buffers[last_used_buffer].data;
     }
     
@@ -118,6 +131,13 @@ double* VectorAccumulator::checkout() {
             last_used_buffer = i;
             active_checkouts++;
             total_checkouts++;
+
+            if (debug_callback) {
+                std::stringstream ss;
+                ss << "Buffer " << i << " checked out by thread " << std::this_thread::get_id();
+                debug_callback(ss.str().c_str());
+            }
+
             return buffers[i].data;
         }
     }
@@ -125,9 +145,10 @@ double* VectorAccumulator::checkout() {
     // This should never be reached due to the earlier checks
     throw std::runtime_error("No buffer available");
 }
+
 // Checkin a buffer
 void VectorAccumulator::checkin(double* buffer) {
-    std::lock_guard<std::mutex> lock(mtx);
+    std::unique_lock<std::mutex> lock(mtx);
     
     auto it = std::find_if(buffers.get(), buffers.get() + num_buffers,
                           [buffer](const Buffer& b) { return b.data == buffer; });
@@ -149,54 +170,58 @@ void VectorAccumulator::checkin(double* buffer) {
     checkout_info[buffer_id].is_checked_out = false;
     buffers[buffer_id].in_use = false;
     active_checkouts--;
-    cv.notify_all();
-    
+
     if (debug_callback) {
         std::stringstream ss;
         ss << "Buffer " << buffer_id << " checked in by thread " << std::this_thread::get_id();
         debug_callback(ss.str().c_str());
     }
+    
+    // Notify waiting threads
+    cv.notify_all();
+    
+    lock.unlock();
 }
-
 // Try checkout with timeout
 std::optional<double*> VectorAccumulator::try_checkout(std::chrono::milliseconds timeout) {
-  std::unique_lock<std::mutex> lock(mtx);
-  auto start_wait = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(mtx);
+    auto start_wait = std::chrono::steady_clock::now();
 
-  bool got_buffer = cv.wait_for(lock, timeout, [this]() {
-    if (is_shutting_down)
-      return true;
-    return std::any_of(&buffers[0], &buffers[num_buffers],
-                       [](const Buffer& b) { return !b.in_use; });
-  });
+    bool got_buffer = cv.wait_for(lock, timeout, [this]() {
+        if (is_shutting_down)
+            return true;
+        return std::any_of(&buffers[0], &buffers[num_buffers], [](const Buffer& b) { return !b.in_use; });
+    });
 
-  if (!got_buffer || is_shutting_down) {
-    total_waits++;
-    auto wait_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start_wait);
-    accumulated_wait_time.fetch_add(wait_duration.count());
-    return std::nullopt;
-  }
+    if (!got_buffer || is_shutting_down) {
+        total_waits++;
+        auto wait_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_wait);
+        accumulated_wait_time.fetch_add(wait_duration.count());
+        return std::nullopt;
+    }
 
-  auto it =
-      std::find_if(&buffers[0], &buffers[num_buffers], [](const Buffer& b) { return !b.in_use; });
-  size_t buffer_id = it->id;
+    auto it =
+        std::find_if(&buffers[0], &buffers[num_buffers], [](const Buffer& b) { return !b.in_use; });
+    size_t buffer_id = it->id;
 
-  it->in_use = true;
-  buffer_ownership[buffer_id] = true;
-  checkout_times[buffer_id].checkout_time = std::chrono::steady_clock::now();
-  checkout_times[buffer_id].owner_thread = std::this_thread::get_id();
-  active_checkouts++;
-  total_checkouts++;
+    it->in_use = true;
+    buffer_ownership[buffer_id] = true;
+    checkout_info[buffer_id].is_checked_out = true;
+    checkout_info[buffer_id].checkout_time = std::chrono::steady_clock::now();
+    checkout_info[buffer_id].owner_thread = std::this_thread::get_id();
+    active_checkouts++;
+    total_checkouts++;
 
-  if (debug_callback) {
-    std::stringstream ss;
-    ss << "Buffer " << buffer_id << " checked out by thread " << std::this_thread::get_id();
-    debug_callback(ss.str().c_str());
-  }
+    if (debug_callback) {
+        std::stringstream ss;
+        ss << "Buffer " << buffer_id << " try-checked out by thread " << std::this_thread::get_id();
+        debug_callback(ss.str().c_str());
+    }
 
-  return it->data;
+    return it->data;
 }
+
 // Reset all buffers
 void VectorAccumulator::reset() {
   if (std::any_of(&buffers[0], &buffers[num_buffers], [](const Buffer& b) { return b.in_use; })) {
@@ -229,36 +254,101 @@ void VectorAccumulator::reset() {
 // Reduce all buffers
 // TODO: Review and fix this method.
 void VectorAccumulator::reduce(double* output) {
-  uint64_t start_cycles = rdtsc();
-
-  if (std::any_of(&buffers[0], &buffers[num_buffers], [](const Buffer& b) { return b.in_use; })) {
-    throw std::runtime_error("Cannot reduce while buffers are checked out");
-  }
-
-  std::memcpy(output, buffers[0].data, aligned_size * sizeof(double));
-
-  for (size_t buf = 1; buf < num_buffers; ++buf) {
-    for (size_t i = 0; i < aligned_size; i += Vec4d::size()) {
-      if (i + PREFETCH_DISTANCE * Vec4d::size() < aligned_size) {
-        _mm_prefetch(reinterpret_cast<const char*>(
-                         &buffers[buf].data[i + PREFETCH_DISTANCE * Vec4d::size()]),
-                     _MM_HINT_T0);
-        _mm_prefetch(reinterpret_cast<const char*>(&output[i + PREFETCH_DISTANCE * Vec4d::size()]),
-                     _MM_HINT_T0);
-      }
-
-      Vec4d sum;
-      sum.load(output + i);
-      Vec4d vec;
-      vec.load(buffers[buf].data + i);
-      sum += vec;
-      sum.store(output + i);
+    uint64_t start_cycles = rdtsc();
+    
+    std::unique_lock<std::mutex> lock(mtx);
+    
+    if (active_checkouts > 0) {
+        throw std::runtime_error("Cannot reduce while buffers are checked out");
     }
-  }
 
-  reduction_cycles.fetch_add(rdtsc() - start_cycles);
+    // Handle edge case: zero buffers
+    if (num_buffers == 0) {
+        std::fill(output, output + buffer_size, 0.0);
+        return;
+    }
+    
+    // Initialize the output array to zero
+    std::fill(output, output + buffer_size, 0.0);
+    
+    // Release the lock before parallel processing
+    lock.unlock();
+    
+    // Determine number of threads for parallel reduction
+    const size_t num_threads = std::min(
+        static_cast<size_t>(std::thread::hardware_concurrency()), 
+        num_buffers
+    );
+    
+    std::vector<std::thread> reduction_threads;
+    reduction_threads.reserve(num_threads);
+    
+    // Thread-local partial sums
+    std::vector<std::vector<double>> thread_local_sums(num_threads, std::vector<double>(buffer_size, 0.0));
+    
+    // Launch reduction threads
+    for (size_t thread_idx = 0; thread_idx < num_threads; ++thread_idx) {
+        reduction_threads.emplace_back([&, thread_idx]() {
+            // Calculate range of buffers for this thread
+            const size_t start_buffer = thread_idx * (num_buffers / num_threads);
+            const size_t end_buffer = (thread_idx == num_threads - 1) 
+                                        ? num_buffers  // Last thread processes the remaining buffers
+                                        : (thread_idx + 1) * (num_buffers / num_threads);
+            
+            auto& local_sums = thread_local_sums[thread_idx];
+
+            // Log assigned range for the thread
+            std::cout << "Thread " << thread_idx << ": processing buffers " 
+                      << start_buffer << " to " << end_buffer - 1 << "\n";
+            
+            // Process assigned buffers
+            for (size_t buf_idx = start_buffer; buf_idx < end_buffer; ++buf_idx) {
+                Buffer& buffer = buffers[buf_idx];
+                
+                // Prefetch next buffer's data
+                if (buf_idx + 1 < num_buffers) {
+                    __builtin_prefetch(buffers[buf_idx + 1].data, 0, 3);
+                }
+                
+                // Process current buffer
+                for (size_t i = 0; i < buffer_size; ++i) {
+                    double current_value = buffer.data[i];
+                    if (!std::isnan(current_value)) { // Ignore NaN
+                        local_sums[i] += current_value;
+                    }
+                }
+            }
+
+            // Log thread-local sums for this thread
+            std::cout << "Thread " << thread_idx << ": local sums = ";
+            for (size_t i = 0; i < std::min(size_t(10), buffer_size); ++i) { // Log first 10 elements
+                std::cout << local_sums[i] << " ";
+            }
+            std::cout << "\n";
+        });
+    }
+    
+    // Wait for all reduction threads to complete
+    for (auto& thread : reduction_threads) {
+        thread.join();
+    }
+    
+    // Combine thread-local results into the output buffer
+    for (size_t i = 0; i < buffer_size; ++i) {
+        for (size_t thread_idx = 0; thread_idx < num_threads; ++thread_idx) {
+            output[i] += thread_local_sums[thread_idx][i];
+        }
+    }
+
+    // Log final output values
+    std::cout << "Final output = ";
+    for (size_t i = 0; i < std::min(size_t(10), buffer_size); ++i) { // Log first 10 elements
+        std::cout << output[i] << " ";
+    }
+    std::cout << "\n";
+    
+    reduction_cycles.fetch_add(rdtsc() - start_cycles, std::memory_order_relaxed);
 }
-
 // Cleanup buffers
 void VectorAccumulator::cleanup() {
   is_shutting_down = true;
