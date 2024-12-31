@@ -298,8 +298,8 @@ void VectorAccumulator::reduce(double* output) {
             auto& local_sums = thread_local_sums[thread_idx];
 
             // Log assigned range for the thread
-            std::cout << "Thread " << thread_idx << ": processing buffers " 
-                      << start_buffer << " to " << end_buffer - 1 << "\n";
+            //std::cout << "Thread " << thread_idx << ": processing buffers " 
+                      //<< start_buffer << " to " << end_buffer - 1 << "\n";
             
             // Process assigned buffers
             for (size_t buf_idx = start_buffer; buf_idx < end_buffer; ++buf_idx) {
@@ -320,11 +320,11 @@ void VectorAccumulator::reduce(double* output) {
             }
 
             // Log thread-local sums for this thread
-            std::cout << "Thread " << thread_idx << ": local sums = ";
-            for (size_t i = 0; i < std::min(size_t(10), buffer_size); ++i) { // Log first 10 elements
-                std::cout << local_sums[i] << " ";
-            }
-            std::cout << "\n";
+            //std::cout << "Thread " << thread_idx << ": local sums = ";
+            //for (size_t i = 0; i < std::min(size_t(10), buffer_size); ++i) { // Log first 10 elements
+            //    std::cout << local_sums[i] << " ";
+            //}
+            //std::cout << "\n";
         });
     }
     
@@ -341,11 +341,11 @@ void VectorAccumulator::reduce(double* output) {
     }
 
     // Log final output values
-    std::cout << "Final output = ";
-    for (size_t i = 0; i < std::min(size_t(10), buffer_size); ++i) { // Log first 10 elements
-        std::cout << output[i] << " ";
-    }
-    std::cout << "\n";
+    //std::cout << "Final output = ";
+    //for (size_t i = 0; i < std::min(size_t(10), buffer_size); ++i) { // Log first 10 elements
+    //    std::cout << output[i] << " ";
+    //}
+    //std::cout << "\n";
     
     reduction_cycles.fetch_add(rdtsc() - start_cycles, std::memory_order_relaxed);
 }
